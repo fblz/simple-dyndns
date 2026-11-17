@@ -6,10 +6,18 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/cloudflare/cloudflare-go"
 )
+
+// safeguard for weak keys
+const minWebTokenLen = 40
+
+// safeguard for slow cloudflare
+const apiRequestTimeout = 10 * time.Second
 
 type Host struct {
 	Hostname string `json:"hostname"`
@@ -23,6 +31,22 @@ type Host struct {
 
 func (h *Host) FQDN() string {
 	return h.Hostname + "." + h.Zone
+}
+
+func (h *Host) Validate() error {
+	if strings.TrimSpace(h.Hostname) == "" {
+		return fmt.Errorf("hostname property not set")
+	}
+	if strings.TrimSpace(h.Zone) == "" {
+		return fmt.Errorf("zone property not set")
+	}
+	if strings.TrimSpace(h.APIToken) == "" {
+		return fmt.Errorf("api_token property not set")
+	}
+	if t := strings.TrimSpace(h.WebToken); t != "" && len(t) < minWebTokenLen {
+		return fmt.Errorf("web_token shorter than %d characters", minWebTokenLen)
+	}
+	return nil
 }
 
 func (h *Host) Populate() error {
@@ -40,7 +64,8 @@ func (h *Host) Populate() error {
 }
 
 func (h *Host) populateAPIInfo() error {
-	api, err := cloudflare.NewWithAPIToken(h.APIToken)
+	api, err := cloudflare.NewWithAPIToken(h.APIToken,
+		cloudflare.HTTPClient(&http.Client{Timeout: apiRequestTimeout}))
 	if err != nil {
 		return err
 	}
@@ -102,7 +127,8 @@ func (h *Host) populateWebToken() error {
 }
 
 func (h *Host) updateIP(ip net.IP) error {
-	api, err := cloudflare.NewWithAPIToken(h.APIToken)
+	api, err := cloudflare.NewWithAPIToken(h.APIToken,
+		cloudflare.HTTPClient(&http.Client{Timeout: apiRequestTimeout}))
 	if err != nil {
 		return err
 	}
@@ -113,7 +139,7 @@ func (h *Host) updateIP(ip net.IP) error {
 	}
 
 	if record.Content != ip.String() {
-		return fmt.Errorf("After UpdateDNSRecord, Cloudflare API did not reflect the IP changes on host " + h.Hostname)
+		return fmt.Errorf("cloudflare did not reflect the IP change for %q", h.FQDN())
 	}
 
 	h.IP = record.Content
@@ -121,15 +147,16 @@ func (h *Host) updateIP(ip net.IP) error {
 }
 
 func (h *Host) createRecord() (*cloudflare.DNSRecord, error) {
-	api, err := cloudflare.NewWithAPIToken(h.APIToken)
+	api, err := cloudflare.NewWithAPIToken(h.APIToken,
+		cloudflare.HTTPClient(&http.Client{Timeout: apiRequestTimeout}))
 	if err != nil {
 		return nil, err
 	}
 
 	// Context for why this pointer to bool is required
 	// https://github.com/cloudflare/cloudflare-go/issues/568
-	proxy := false
-	result, err := api.CreateDNSRecord(context.Background(), cloudflare.ZoneIdentifier(h.ZoneID), cloudflare.CreateDNSRecordParams{Name: h.FQDN(), Type: "A", Content: "0.0.0.0", TTL: 300, Proxied: &proxy})
+	noproxy := false
+	result, err := api.CreateDNSRecord(context.Background(), cloudflare.ZoneIdentifier(h.ZoneID), cloudflare.CreateDNSRecordParams{Name: h.FQDN(), Type: "A", Content: "0.0.0.0", TTL: 300, Proxied: &noproxy})
 	if err != nil {
 		return nil, err
 	}

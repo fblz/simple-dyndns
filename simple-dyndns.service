@@ -11,6 +11,7 @@ StateDirectory=simple-dyndns
 MemoryDenyWriteExecute=true
 ProtectKernelModules=true
 NoNewPrivileges=true
+LockPersonality=true
 UMask=0177
 
 PrivateDevices=true

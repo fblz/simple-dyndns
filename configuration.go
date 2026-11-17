@@ -1,17 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
 )
 
 type Configuration struct {
 	hosts []Host
 }
 
-// ReadConfig reads the configuration file
+// Initializes the configuration
 func NewConfiguration(configPath string) (*Configuration, error) {
 	confBytes, err := os.ReadFile(configPath)
 	if err != nil {
@@ -27,38 +28,26 @@ func NewConfiguration(configPath string) (*Configuration, error) {
 	this := new(Configuration)
 
 	for i := range hosts {
-
-		if strings.TrimSpace(hosts[i].Hostname) == "" {
-			fmt.Printf("Record %d (%s) has errors and is not loaded:\n", i, hosts[i].FQDN())
-			fmt.Println("Hostname property not set")
+		if err := hosts[i].Validate(); err != nil {
+			fmt.Printf("Record %d (%q) has errors and is not loaded: %v\n", i, hosts[i].FQDN(), err)
+			continue
 		}
 
-		if strings.TrimSpace(hosts[i].Zone) == "" {
-			fmt.Printf("Record %d (%s) has errors and is not loaded:\n", i, hosts[i].FQDN())
-			fmt.Println("Zone property not set")
-		}
-
-		if strings.TrimSpace(hosts[i].APIToken) == "" {
-			fmt.Printf("Record %d (%s) has errors and is not loaded:\n", i, hosts[i].FQDN())
-			fmt.Println("APIToken property not set")
-		}
-
-		err := hosts[i].Populate()
-		if err != nil {
-			fmt.Printf("Record %d (%s) has errors and is not loaded:\n", i, hosts[i].FQDN())
-			fmt.Println(err)
+		if err := hosts[i].Populate(); err != nil {
+			fmt.Printf("Record %d (%q) has errors and is not loaded: %v\n", i, hosts[i].FQDN(), err)
 			continue
 		}
 		this.hosts = append(this.hosts, hosts[i])
 	}
 
-	confBytes, err = json.MarshalIndent(hosts, "", "\t")
+	newBytes, err := json.MarshalIndent(hosts, "", "\t")
 	if err != nil {
 		return nil, err
 	}
-	err = os.WriteFile(configPath, confBytes, 0600)
-	if err != nil {
-		return nil, err
+	if !bytes.Equal(newBytes, confBytes) {
+		if err := writeFileAtomic(configPath, newBytes); err != nil {
+			return nil, err
+		}
 	}
 
 	if len(this.hosts) == 0 {
@@ -75,5 +64,50 @@ func (c *Configuration) GetHost(fqdn string) (*Host, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("unknown fqdn %s", fqdn)
+	return nil, fmt.Errorf("unknown fqdn %q", fqdn)
+}
+
+// atomic write (temp file + rename).
+func writeFileAtomic(path string, data []byte) error {
+	// do not overwrite a symlink, resolve it
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(resolved)
+
+	// some folder = same filesystem = move is atomic
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // useless in case of success, but cleans up otherwise
+
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpName, resolved); err != nil {
+		return err
+	}
+
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
